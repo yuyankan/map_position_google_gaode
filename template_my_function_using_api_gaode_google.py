@@ -283,73 +283,102 @@ def search_poi_gaode(query_address, key=key_gaode):
 
 
 
+import requests
+import pandas as pd
+from typing import Optional, List
 
-def reverse_geocode_amap(address_query,lon, lat, key=key_gaode):
+
+PROXY_HOST = "127.0.0.1" 
+PROXY_PORT = "9000"
+PROXY_URL = f"http://{PROXY_HOST}:{PROXY_PORT}"
+
+# requests 库使用的代理字典
+PROXIES = {
+    "http": PROXY_URL,
+    "https": PROXY_URL,
+}
+key_gaode = '7cdc431fbc1a34d3e085684d8df920b2'
+
+
+# update check lon, lat of gaode: 
+def get_gaode_location_df(
+    addresses: List[str],
+    city: str = "",
+    key_gaode=key_gaode,
+    proxy=PROXIES
+) -> pd.DataFrame:
     """
-    通过高德地图API进行逆地理编码，获取省市信息。
-
-    Args:
-        lon (float): 经度 (Longitude)。
-        lat (float): 纬度 (Latitude)。
-        key (str): 你的高德 Web 服务 Key。
-
-    Returns:
-        dict: 包含 'province', 'city', 'district' 的字典，如果失败则返回 None。
+    批量查询高德经纬度，返回 DataFrame，并标注使用的接口
+    
+    参数:
+        addresses: List[str] - 地址列表
+        key_gaode: str - 高德API key
+        proxy: dict - requests 代理，例如 {"http": "http://127.0.0.1:1080"}
+        city: str - 默认城市，便于精确搜索
+    
+    返回:
+        pd.DataFrame - 包含 query_address, lon, lat, address_searched, source
     """
-    url = "https://restapi.amap.com/v3/geocode/regeo"
+    results = []
     
-    # 高德 API 接收经纬度格式为 lon,lat
-    location = f"{lon},{lat}"
-    
-    params = {
-        "key": key,
-        "location": location,
-        "extensions": "base",  # 只返回基础信息，加快速度
-        "output": "json"
-    }
-    
-    try:
-        response = requests.get(url, params=params,proxies=PROXIES)
-        response.raise_for_status() # 检查HTTP请求是否成功 (状态码200)
-        data = response.json()
+    for addr in addresses:
+        lon, lat, addr_searched, source = None, None, None, None
         
-        if data['status'] == '1' and data.get('regeocode'):
-            address = data['regeocode']['addressComponent']
-            
-            # 高德返回的 'city' 字段，如果该点位于直辖市，则 city 字段为空
-            # 此时 province 字段就是直辖市的名称
-            result =  {
-                'province': address.get('province', '') or address.get('city', ''),
-                'city': address.get('city', '') or address.get('district', ''),
-                'district': address.get('district', ''),
-                'query':address_query,
-                'lon':lon,
-                'lat':lat
+        # -----------------------------
+        # Step 1: Geo 地理编码
+        # -----------------------------
+        geo_url = "https://restapi.amap.com/v3/geocode/geo"
+        geo_params = {
+            "address": addr,
+            "city": city,
+            "key": key_gaode
+        }
+        try:
+            geo_resp = requests.get(geo_url, params=geo_params, proxies=proxy, timeout=5).json()
+            geocodes = geo_resp.get("geocodes", [])
+            if geocodes:
+                location = geocodes[0]["location"]  # "lon,lat"
+                lon, lat = location.split(",")
+                addr_searched = geocodes[0].get("formatted_address", addr)
+                source = "geo"
+        except Exception as e:
+            print(f"[Geo Error] {e}")
+        
+        # -----------------------------
+        # Step 2: Place/Text POI搜索（仅当 geo失败）
+        # -----------------------------
+        if lon is None or lat is None:
+            place_url = "https://restapi.amap.com/v5/place/text"
+            place_params = {
+                "keywords": addr,
+                "city": city,
+                "key": key_gaode,
+                "limit": 1
             }
-            #print(result)
-            # 检查 address 是否为列表且是否为空
-            if isinstance(result['province'], list) and len(result['province']) == 0:
-                result['province'] = 'N/A' # 或 ''，确保它是一个标量
-
-
-            if isinstance(result['city'], list) and len(result['city']) == 0:
-                result['city'] = 'N/A' # 或 ''，确保它是一个标量
-
-            if isinstance(result['district'], list) and len(result['district']) == 0:
-                result['district'] = 'N/A' # 或 ''，确保它是一个标量
-           
-
-
-
-            return pd.DataFrame(result, index=[0])
+            try:
+                place_resp = requests.get(place_url, params=place_params, proxies=proxy, timeout=5).json()
+                pois = place_resp.get("pois", [])
+                if pois:
+                    location = pois[0]["location"]
+                    lon, lat = location.split(",")
+                    addr_searched = pois[0].get("name", addr)
+                    source = "place_text"
+            except Exception as e:
+                print(f"[Place/Text Error] {e}")
         
-        else:
-            print(f"API调用失败或结果为空: {data.get('info')}")
-            return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"请求发生错误: {e}")
-        return None
-    except json.JSONDecodeError:
-        print("API返回数据格式错误。")
-        return None
+        # -----------------------------
+        # 记录结果
+        # -----------------------------
+        results.append({
+            "query_address": addr,
+            "lon": lon,
+            "lat": lat,
+            "address_searched": addr_searched,
+            "source": source
+        })
+    
+    df = pd.DataFrame(results)
+    return df
+
+
+
